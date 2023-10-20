@@ -29,7 +29,7 @@ static struct perf_event_attr pebs_attr = {
     .size = sizeof(struct perf_event_attr),
     .config = 0x20D1,
     .sample_period = 125,  // record one out of every sample_period_ events
-    .sample_type = PERF_SAMPLE_TID | PERF_SAMPLE_ADDR | PERF_SAMPLE_PHYS_ADDR | PERF_SAMPLE_TIME | PERF_SAMPLE_CPU,
+    .sample_type = PERF_SAMPLE_TID | PERF_SAMPLE_ADDR | PERF_SAMPLE_PHYS_ADDR | PERF_SAMPLE_TIME | PERF_SAMPLE_CPU | PERF_SAMPLE_WEIGHT,
     .disabled = 0,                  // 0 means enable the event
     .exclude_kernel = 1,            // don't count kernel events
     .exclude_hv = 1,                // don't count hypervisor
@@ -57,6 +57,7 @@ struct perf_record {
   uint64_t time;
   uint64_t addr;
   uint32_t cpu, res;
+  uint64_t weight;
   uint64_t phys_addr;
 };
 
