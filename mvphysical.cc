@@ -12,6 +12,8 @@
 #include "sample.h"
 #include "util.h"
 
+#include "region.h"
+
 void Usage(char **argv) {
   exit(1);
 }
@@ -330,6 +332,125 @@ void scan_page_table(PageTable &page_table) {
   PRINT("%lu PEBS hits in the sample period\n", total.hits);
 }
 
+/*
+ * Set the idle bitmap in cacheline sized chunks
+ */
+void set_idle(uintptr_t start_pfn, uintptr_t end_pfn) {
+  if (end_pfn <= start_pfn) return;
+
+  const size_t kBufSize = 16 * sizeof(uint64_t);
+
+  int fd = open("/sys/kernel/mm/page_idle/bitmap", O_WRONLY);
+
+  uint8_t buf[kBufSize];
+  memset(buf, 0xff, kBufSize);
+
+  uint64_t off = start_pfn / 64ull * 8ull;
+
+  int rc = 0;
+  do {
+    off += rc;  
+    if (off >= end_pfn / 64ull * 8ull) break;
+    rc = pwrite(fd, buf, kBufSize, off);
+  } while (rc > 0);
+
+  if (rc <= 0) PRINT("pwrite to idle bitmap rc %d errno %d\n", rc, errno);
+
+  PRINT("wrote %lu bytes to idle bitmap\n", off - start_pfn / 64ull * 8ull);
+
+  close(fd);
+}
+
+/*
+ * Read the idle bitmap and call the callback with memory regions -> start, end
+ */
+template <class CALLBACK>
+void scan_idle(const CALLBACK &callback) {
+  const size_t kBufSize = 8;
+  uint64_t buf[kBufSize];
+  const size_t kBufBytes = 8 * sizeof(uint64_t);
+
+  /* Going to need a handle into kpageflags for thp */
+  int fd = open("/sys/kernel/mm/page_idle/bitmap", O_RDONLY);
+  int pf = open("/proc/kpageflags", O_RDONLY);
+  if (fd < 0 || pf < 0) ERROR(1, "Couldn't open kpageflags (%d) or page_idle/bitmap (%d)\n", pf, fd);
+
+  bool seek_end = false;
+  bool huge_page = false;
+  size_t start_pfn = 0, end_pfn = 0;
+
+  size_t off = 0;
+  size_t thp = 0;
+  int rc = 0;
+  do {
+    off += rc;
+    rc = pread(fd, buf, kBufBytes, off);
+
+    size_t check = buf[0] | buf[1] | buf[2] | buf[3] | buf[4] | buf[5] | buf[6] | buf[7];
+    if (!check) {
+      if (seek_end) {
+        end_pfn = (off * 8ull) - 1ull;
+        seek_end = false;
+        callback(start_pfn, end_pfn, huge_page);
+      }
+      continue;
+    }
+
+    /* state 1 find the first set bit */
+    size_t j = 0, i = 0;
+    if (!seek_end) {
+      for (; j < kBufBytes; ++j) {
+        for (; i < 64; ++i) {
+          if ((buf[j] & (1ull << i)) == 0 /* 0 is not-idle */) {
+            start_pfn = (off + j) * 8ull + i;
+            
+            /*
+             * check if this pfn is the head of a huge page,
+             * in which case we have to mark the remaining pages as not-idle.
+             */
+            uint64_t flags;
+            rc = pread(pf, &flags, sizeof(uint64_t), start_pfn * sizeof(uint64_t));
+            if (rc < 0) ERROR(1, "kpageflags read errno %d\n", errno);
+            if (((flags >> 22) & 1) && ((flags >> 15) & 1)) {
+              huge_page = true;
+              thp = 512;
+            } else {
+              thp = 0;
+              huge_page = false;
+            }
+            
+            end_pfn = start_pfn;
+            seek_end = true;
+            break;
+          }
+        }
+        if (seek_end) break;
+      }
+    }
+
+    /* state 2 find the last contiguous 0 bit */
+    if (seek_end) {
+      for (; j < kBufBytes; ++j) {
+        for (; i < 64; ++i) {
+          if ((buf[j] & (1ull << i)) == 1 /* 1 is idle */) {
+            if (thp && thp--) continue;
+            end_pfn = ((off + j) * 8ull + i) - 1ull;
+            seek_end = false;
+            callback(start_pfn, end_pfn, huge_page);
+            break;
+          }
+        }
+        if (!seek_end) break;
+      }
+    }
+
+  } while (rc > 0);
+  /* wowza that's ugly !! */
+
+  close(fd);
+  close(pf);
+}
+
 int main(int argc, char **argv) {
   const size_t kGb = 1024ull * 1024ull * 1024ull;
   const size_t kMb = 1024ull * 1024ull;
@@ -360,7 +481,7 @@ int main(int argc, char **argv) {
   PRINT("setting up PEBS\n");
 
   sample::Event pebs_event;
-  std::atomic_uint64_t sample_period = 1000;
+  std::atomic_uint64_t sample_period = 5000;
   pebs_event.period_atomic = &sample_period;
   pebs_event.config = 0x20D1;
   pebs_event.dev = "cpu";
@@ -374,6 +495,40 @@ int main(int argc, char **argv) {
   PRINT("starting up PEBS thread\n");
 
   std::thread pebs_thread([&]() { read_pebs(&pebs, &page_table); });
+
+  /* 2 -> Memory regions */
+  Regions<Region> regions;
+
+  /* 2 -> Set IDLE bit */
+  PRINT("setting all IDLE bits to 1. May take some time...\n");
+  
+  TIME(set_idle(0, max_pfn));
+
+  /* MapScanner for getting the numa of each phys-addr */
+  MapScanner map_scanner;
+
+  /* Some statistics */
+  struct {
+    /* regions per node */
+    uint64_t regions[8] = {0};
+    /* usage per node */
+    uint64_t usage[8] = {0};
+  } stats;
+
+  /* 2 -> Scan IDLE map and define memory regions */
+  scan_idle([&](uintptr_t start, uintptr_t end, bool huge_page) {
+    uint64_t node = map_scanner.GetNumaOfPfn(start);
+    PRINT("[0x%lx - 0x%lx] N%lu %s\n", start, end, node, huge_page ? "HUGE PAGE" : "");
+    stats.regions[node] += 1;
+    stats.usage[node] += (end - start) * 4096ull;
+  });
+  // scan_idle([&](uintptr_t start, uintptr_t end) { regions.Insert(start, {start, end, 0}); });
+  
+  /* print stats */
+  for (size_t i = 0; i < 8; ++i) {
+    if (!stats.regions[i]) continue;
+    PRINT("Node %lu:\n\tusage %lu mb\n\t%lu regions\n", i, stats.usage[i] / kMb, stats.regions[i]);
+  }
 
   /* 3 -> main loop */
   PRINT("setup done. starting main loop\n");
