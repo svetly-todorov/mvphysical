@@ -67,4 +67,10 @@ static inline void fancy_err(int err, const char *name, const char *format, ...)
   PRINT("--------\n");                       \
   }
 
+#define BREAK() {                            \
+  PRINT("--------\n");                       \
+  PRINT("        \n");                       \
+  PRINT("--------\n");                       \
+  }
+
 #endif

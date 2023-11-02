@@ -14,3 +14,6 @@ mvphysical: mvphysical.cc
 
 mvmap: mvmap.cc
 	g++  $(CXXFLAGS) -o $@ $< -lnuma
+
+mvmap2: mvmap2.cc
+	g++  $(CXXFLAGS) -o $@ $< -lnuma
