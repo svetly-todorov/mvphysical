@@ -11,3 +11,6 @@ clean:
 
 mvphysical: mvphysical.cc
 	g++  $(CXXFLAGS) -o $@ $< -lnuma
+
+mvmap: mvmap.cc
+	g++  $(CXXFLAGS) -o $@ $< -lnuma
