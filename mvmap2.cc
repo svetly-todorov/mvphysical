@@ -18,7 +18,7 @@ struct Args {
 };
 
 void Usage(char **argv) {
-  printf("\t%s FAR_NODE_0 ... FAR_NODE_N:\n\tperform and time a reverse pfn-to-vma mapping for PID\n", argv[0]);
+  printf("\t%s [-c] FAR_NODE_0 ... FAR_NODE_N:\n\tperform and time a reverse pfn-to-vma mapping for PID\n\t-c: output timed values in csv format\n", argv[0]);
   exit(1);
 }
 
@@ -46,11 +46,9 @@ void reverse_map_job(std::vector<Mapping> &out, MapScanner &map_scanner, uint64_
 }
 
 void reverse_map(std::vector<pid_t> &pids, std::unordered_map<uintptr_t, Vma> &out) {
-  /*
-   * The plan: boot up 8 threads and scan over each /proc/pid/pagemap.
-   * Get back a bunch of vectors and merge them into a map.
-   */
-  const size_t kWorkers = 8;
+  /* For some reason it seems that using 1 worker is just about as fast as 8. 
+   * Maybe my setup is wrong, or there's something wrong with my caching scheme. */
+  const size_t kWorkers = 1;
 
   std::atomic_bool done[kWorkers];
   
@@ -200,19 +198,19 @@ int main(int argc, char **argv) {
     cg.open(dir + "/cgroup.procs");
     if (!cg.is_open()) ERROR(1, "ifstream open %s/cgroup.procs\n", dir.c_str());
 
-    BREAK();
-    PRINT("From %s (usage %lu b) add:\n", dir.c_str(), bytes);
+    // BREAK();
+    // PRINT("From %s (usage %lu b) add:\n", dir.c_str(), bytes);
 
     while (std::getline(cg, line)) {
       std::istringstream iss(line);
       std::string token;
       if (iss >> token) {
         cxl_pids.push_back(atoi(token.c_str()));
-        PRINT("\t%s\n", token.c_str());
+        // PRINT("\t%s\n", token.c_str());
       }
     }
 
-    BREAK();
+    // BREAK();
   }
 
   BREAK();
